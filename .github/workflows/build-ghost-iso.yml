@@ -57,17 +57,26 @@ jobs:
           $rel  = '${{ inputs.win_release }}'
           $lang = '${{ inputs.language }}'
 
-          # Try the Pro edition first; fall back to the multi-edition ISO
-          # (which also contains Pro - we select the Pro index later anyway).
+          # Fido matches -Rel by prefix against Microsoft's CURRENT consumer
+          # download list and -Ed by regex. That list rotates: releases that
+          # age out (e.g. 24H2) disappear, and the multi-edition is named
+          # 'Windows 11 Home/Pro/Edu' there (it contains the Pro index, which
+          # is selected later anyway). So: try the requested release first,
+          # then fall back to 'Latest'; try the current edition name first.
           # Fido runs in a CHILD powershell process: the script may call exit,
           # which must not be able to terminate this step's host session.
+          # Fido's full output is echoed to the log so failures are diagnosable.
           $isoUrl = $null
-          foreach ($ed in @('Pro', 'Home/Pro/Edu')) {
-            try {
-              $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\work\Fido.ps1 -Win 11 -Rel $rel -Ed $ed -Lang $lang -Arch x64 -GetUrl 2>$null
-              $candidate = ($out | Select-Object -Last 1).ToString().Trim()
-              if ($candidate -match '^https://') { $isoUrl = $candidate; Write-Host "Fido edition '$ed' OK"; break }
-            } catch { Write-Host "Fido edition '$ed' failed: $($_.Exception.Message)" }
+          foreach ($relCandidate in @($rel, 'Latest')) {
+            foreach ($ed in @('Windows 11 Home/Pro/Edu', 'Pro', 'Home/Pro/Edu')) {
+              Write-Host "Trying Fido: -Rel $relCandidate -Ed $ed -Lang $lang"
+              $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\work\Fido.ps1 -Win 11 -Rel $relCandidate -Ed $ed -Lang $lang -Arch x64 -GetUrl
+              $lines = @($out | ForEach-Object { "$_".Trim() })
+              $lines | ForEach-Object { Write-Host "  fido: $_" }
+              $candidate = ($lines | Where-Object { $_ -match '^https://' } | Select-Object -Last 1)
+              if ($candidate) { $isoUrl = $candidate; Write-Host "Fido OK: -Rel $relCandidate -Ed $ed"; break }
+            }
+            if ($isoUrl) { break }
           }
           if (-not $isoUrl) { throw 'Fido did not return an ISO download URL' }
           Write-Host "ISO URL: $isoUrl"
