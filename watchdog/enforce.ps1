@@ -35,8 +35,8 @@ try {
 # ---------- 0 (cont.): scripts, Sentinel/Guardian tasks, integrity ----------
 $ntDir = 'C:\ProgramData\NoTracking'
 $bakDir = 'C:\Windows\Setup\NoTracking'
-# Restore the Sentinel/Guardian scripts from the pristine backup if deleted
-foreach ($f in 'sentinel.ps1','guardian.ps1') {
+# Restore the other scripts from the pristine backup if deleted
+foreach ($f in 'sentinel.ps1','guardian.ps1','allow.ps1','remove.ps1') {
   if (-not (Test-Path "$ntDir\$f") -and (Test-Path "$bakDir\$f")) {
     Copy-Item "$bakDir\$f" "$ntDir\$f" -Force
     Log "Self-heal: $f restored from backup"
@@ -71,15 +71,15 @@ try {
   if (Test-Path $hb) { if (((Get-Date) - (Get-Item $hb).LastWriteTime).TotalSeconds -lt 180) { $stale = $false } }
   if ($stale) { Start-ScheduledTask -TaskName 'NoTracking-Sentinel'; Log 'Self-heal: sentinel heartbeat stale/missing - started NoTracking-Sentinel' }
 } catch { Log "Self-heal: sentinel heartbeat check failed: $($_.Exception.Message)" }
-# Integrity: Sentinel/Guardian scripts must match their recorded SHA256.
+# Integrity: the other scripts must match their recorded SHA256.
 # On mismatch, restore from the pristine backup. If hashes.txt itself is
-# missing, restore all three scripts from backup (when backups exist) and
+# missing, restore all five scripts from backup (when backups exist) and
 # regenerate hashes.txt - this is also the first-run bootstrap on the ISO
 # install path, where backups are staged but hashes.txt is not.
 try {
   $hashFile = "$ntDir\hashes.txt"
   function Write-Hashes {
-    $lines = foreach ($f in 'enforce.ps1','sentinel.ps1','guardian.ps1') {
+    $lines = foreach ($f in 'enforce.ps1','sentinel.ps1','guardian.ps1','allow.ps1','remove.ps1') {
       if (Test-Path "$ntDir\$f") { "$f $((Get-FileHash "$ntDir\$f" -Algorithm SHA256).Hash)" }
     }
     Set-Content $hashFile $lines
@@ -88,7 +88,7 @@ try {
     $recorded = @{}
     foreach ($l in (Get-Content $hashFile)) { $parts = $l -split '\s+'; if ($parts.Count -ge 2) { $recorded[$parts[0]] = $parts[1] } }
     $dirty = $false
-    foreach ($f in 'sentinel.ps1','guardian.ps1') {
+    foreach ($f in 'sentinel.ps1','guardian.ps1','allow.ps1','remove.ps1') {
       if ($recorded.ContainsKey($f) -and (Test-Path "$ntDir\$f")) {
         $now = (Get-FileHash "$ntDir\$f" -Algorithm SHA256).Hash
         if ($now -ne $recorded[$f]) {
@@ -101,13 +101,31 @@ try {
     if ($dirty) { Write-Hashes }
   } else {
     $restored = $false
-    foreach ($f in 'enforce.ps1','sentinel.ps1','guardian.ps1') {
+    foreach ($f in 'enforce.ps1','sentinel.ps1','guardian.ps1','allow.ps1','remove.ps1') {
       if (Test-Path "$bakDir\$f") { Copy-Item "$bakDir\$f" "$ntDir\$f" -Force; $restored = $true }
     }
     Write-Hashes
     Log "Self-heal: hashes.txt was missing - restored-from-backup=$restored, regenerated hashes.txt"
   }
 } catch { Log "Self-heal: integrity check failed: $($_.Exception.Message)" }
+# DownloadGuard gate file: binds the ALLOW / REMOVE buttons to ONE local
+# account (its SID). Created on the first Enforce run that executes in a
+# real user context - on the ISO install path that is the unattend
+# first-logon run - so the buttons work from first logon with no manual
+# finishing step. In a SYSTEM context there is no user to bind: log and
+# leave it for the first user-context run.
+try {
+  $gateFile = "$ntDir\gate.cfg"
+  if (-not (Test-Path $gateFile)) {
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent()
+    if (-not $me.IsSystem) {
+      Set-Content $gateFile "OwnerSID=$($me.User.Value)"
+      Log "Self-heal: Created gate.cfg for $($me.Name)"
+    } else {
+      Log 'ALERT: gate.cfg missing (will be created at first user-context run)'
+    }
+  }
+} catch { Log "Self-heal: gate.cfg check failed: $($_.Exception.Message)" }
 
 Log '--- enforce run start ---'
 

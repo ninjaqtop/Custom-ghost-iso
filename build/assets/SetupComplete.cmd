@@ -24,8 +24,8 @@ if not exist "%ENF%" (
   )
 )
 
-REM --- Same restore for the Sentinel and Guardian scripts ---
-for %%F in (sentinel.ps1 guardian.ps1) do (
+REM --- Same restore for the Sentinel, Guardian, Allow and Remove scripts ---
+for %%F in (sentinel.ps1 guardian.ps1 allow.ps1 remove.ps1) do (
   if not exist "%NT%\%%F" (
     if exist "%WINDIR%\Setup\NoTracking\%%F" (
       copy /Y "%WINDIR%\Setup\NoTracking\%%F" "%NT%\%%F" >> "%LOG%" 2>&1

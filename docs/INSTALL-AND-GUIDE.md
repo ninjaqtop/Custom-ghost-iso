@@ -73,12 +73,13 @@ installer later is safe; it re-stages and re-registers everything.
 6. **First logon:** `SetupComplete` has already registered the tasks and run
    Enforce as SYSTEM during setup; at first sign-in the answer file runs
    Enforce once in your user context and applies the folder ACLs.
-7. **Finishing step (current known exception):** the warning buttons'
-   `gate.cfg` is **not** created automatically on the ISO path yet (see §6).
-   Until that gap closes, **run the Route A paste installer once** on the
-   installed system: it creates `gate.cfg` for your account and aligns the
-   integrity hashes for all five scripts. Everything else already works
-   without this step — only the ALLOW/REMOVE buttons wait for it.
+7. **No finishing step needed.** The first-logon Enforce run (step 6)
+   executes in your user context, and Enforce now creates the warning
+   buttons' `gate.cfg` itself whenever it is missing — bound to your
+   account SID. The ALLOW/REMOVE buttons therefore work from first logon.
+   (Enforce's self-healing also covers all five scripts now: its
+   restore-from-backup, hash-verify, and hash-regeneration lists all
+   include `allow.ps1` and `remove.ps1`.)
 8. After installing: set **USB Boot Support back OFF** in BIOS.
 
 ## 4. Post-install proof checklist (run on the PC)
@@ -174,13 +175,13 @@ Get-ChildItem C:\ProgramData\NoTracking\Quarantine -ErrorAction SilentlyContinue
   these scripts passed structural verification (balance, diff audit,
   cross-file consistency) — the first true PowerShell parse happens on
   your PC. (v3 and v4 both ran clean on their first parses.)
-- **Known exceptions (stated plainly):**
-  1. Enforce's hash-verify/restore loops still cover the three core
-     scripts; `allow.ps1`/`remove.ps1` are protected by the Guardian's
-     existence-restore and carry their hashes in the installer's records,
-     but are not yet in Enforce's own integrity loop.
-  2. On the ISO path, `gate.cfg` is created by the finishing step in §3.7
-     (running the paste installer once), not automatically at first logon.
-  3. SetupComplete's restore-if-missing list may not name the two newest
-     scripts; the image stages all five regardless (live + backup), and
-     the Enforce/Guardian self-heal covers restoration after first boot.
+- **Former exceptions — closed 2026-10-28:** earlier states of this guide
+  listed three open items; all are now closed, and no manual finishing
+  step remains on either install route.
+  1. Enforce's restore, hash-verify, and hash-regeneration lists cover
+     all five scripts, including `allow.ps1`/`remove.ps1`.
+  2. On the ISO path, `gate.cfg` is created automatically at the first
+     user-context Enforce run (the unattend first-logon run), so the
+     ALLOW/REMOVE buttons are live from first logon.
+  3. SetupComplete's restore-if-missing enumeration names all five
+     scripts (enforce plus sentinel, guardian, allow, remove).
