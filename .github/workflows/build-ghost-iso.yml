@@ -157,6 +157,12 @@ jobs:
           $imgFile = if (Test-Path $esdPath) { $esdPath } else { $wimPath }
           Write-Host "Source image: $imgFile"
 
+          # The downloaded ISO was fully extracted in the previous step and
+          # is never read again. The runner disk must also hold the media,
+          # the rebuilt ISO and its split parts, so reclaim its ~9 GB now.
+          Remove-Item C:\work\Win11.iso -Force -ErrorAction SilentlyContinue
+          Write-Host ("C: free after source-ISO cleanup: {0:N1} GB" -f ((Get-PSDrive C).Free / 1GB))
+
           $images = Get-WindowsImage -ImagePath $imgFile
           $images | Select-Object ImageIndex, ImageName | Format-Table -Auto
           $pro = $images | Where-Object { $_.ImageName -eq $edition } | Select-Object -First 1
@@ -246,6 +252,12 @@ jobs:
           $isoPath  = 'C:\work\ghost-win11.iso'
           $outDir   = 'C:\work\out'
           $partSize = 1900MB
+          # oscdimg has consumed the media tree; it is never read again.
+          # Reclaim its space so the parts (a full second copy of the ISO)
+          # fit on the runner disk alongside the rebuilt ISO.
+          Write-Host ("C: free before split: {0:N1} GB" -f ((Get-PSDrive C).Free / 1GB))
+          Remove-Item C:\work\media -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host ("C: free after media cleanup: {0:N1} GB" -f ((Get-PSDrive C).Free / 1GB))
           $buffer   = New-Object byte[] (10MB)
           $input    = [System.IO.File]::OpenRead($isoPath)
           try {
