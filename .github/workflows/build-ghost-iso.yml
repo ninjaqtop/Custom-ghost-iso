@@ -82,8 +82,19 @@ jobs:
           Write-Host "ISO URL: $isoUrl"
 
           Write-Host 'Downloading ISO (this is several GB)...'
-          & curl.exe -L --fail --retry 5 --retry-delay 10 -o C:\work\Win11.iso $isoUrl
-          if ($LASTEXITCODE -ne 0) { throw "ISO download failed (curl exit $LASTEXITCODE)" }
+          # curl's --retry does not cover exit 18 (connection closed with
+          # bytes still missing - seen at 92% on a previous run), so loop
+          # here and resume the partial file with -C - until the transfer
+          # completes. If the server refuses byte ranges (exit 33), drop
+          # the partial and restart the download from scratch.
+          $dlOk = $false
+          for ($attempt = 1; $attempt -le 10 -and -not $dlOk; $attempt++) {
+            if ($attempt -gt 1) { Write-Host "Resuming ISO download (attempt $attempt of 10)..."; Start-Sleep -Seconds 10 }
+            & curl.exe -L --fail -C - -o C:\work\Win11.iso $isoUrl
+            if ($LASTEXITCODE -eq 0) { $dlOk = $true }
+            elseif ($LASTEXITCODE -eq 33) { Remove-Item C:\work\Win11.iso -Force -ErrorAction SilentlyContinue }
+          }
+          if (-not $dlOk) { throw "ISO download failed after 10 attempts (last curl exit $LASTEXITCODE)" }
 
           $iso = Get-Item C:\work\Win11.iso
           $hash = (Get-FileHash $iso.FullName -Algorithm SHA256).Hash
