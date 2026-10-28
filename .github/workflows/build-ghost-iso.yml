@@ -1,0 +1,294 @@
+name: Build Ghost Windows 11 ISO
+
+# Builds a hardened Windows 11 Pro x64 ISO from the OFFICIAL Microsoft ISO:
+# official download via Fido -> ADK oscdimg -> DISM offline servicing
+# (strip provisioned apps, apply policies offline, inject the NoTracking
+# watchdog) -> rebuild bootable ISO -> publish parts as a Release + artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      win_release:
+        description: "Windows 11 release (passed to Fido, e.g. 24H2)"
+        required: true
+        default: "24H2"
+        type: string
+      edition_index_name:
+        description: "Image edition to keep from the official ISO"
+        required: true
+        default: "Windows 11 Pro"
+        type: string
+      language:
+        description: "ISO language (passed to Fido, e.g. English)"
+        required: true
+        default: "English"
+        type: string
+
+permissions:
+  contents: write # needed to create the Release with ISO parts
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare workspace
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path C:\work\media, C:\work\mount, C:\work\out | Out-Null
+          Get-PSDrive C | Select-Object Name, @{n='FreeGB'; e={[math]::Round($_.Free/1GB,1)}}
+
+      # ------------------------------------------------------------------
+      # 1. Official Microsoft ISO via Fido (Rufus author's script)
+      # ------------------------------------------------------------------
+      - name: Download official Windows ISO (Fido)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          $fidoUrl = 'https://raw.githubusercontent.com/pbatard/Fido/master/Fido.ps1'
+          Invoke-WebRequest -Uri $fidoUrl -OutFile C:\work\Fido.ps1 -UseBasicParsing
+          Write-Host "Fido.ps1 downloaded: $((Get-Item C:\work\Fido.ps1).Length) bytes"
+
+          $rel  = '${{ inputs.win_release }}'
+          $lang = '${{ inputs.language }}'
+
+          # Try the Pro edition first; fall back to the multi-edition ISO
+          # (which also contains Pro - we select the Pro index later anyway).
+          # Fido runs in a CHILD powershell process: the script may call exit,
+          # which must not be able to terminate this step's host session.
+          $isoUrl = $null
+          foreach ($ed in @('Pro', 'Home/Pro/Edu')) {
+            try {
+              $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\work\Fido.ps1 -Win 11 -Rel $rel -Ed $ed -Lang $lang -Arch x64 -GetUrl 2>$null
+              $candidate = ($out | Select-Object -Last 1).ToString().Trim()
+              if ($candidate -match '^https://') { $isoUrl = $candidate; Write-Host "Fido edition '$ed' OK"; break }
+            } catch { Write-Host "Fido edition '$ed' failed: $($_.Exception.Message)" }
+          }
+          if (-not $isoUrl) { throw 'Fido did not return an ISO download URL' }
+          Write-Host "ISO URL: $isoUrl"
+
+          Write-Host 'Downloading ISO (this is several GB)...'
+          & curl.exe -L --fail --retry 5 --retry-delay 10 -o C:\work\Win11.iso $isoUrl
+          if ($LASTEXITCODE -ne 0) { throw "ISO download failed (curl exit $LASTEXITCODE)" }
+
+          $iso = Get-Item C:\work\Win11.iso
+          $hash = (Get-FileHash $iso.FullName -Algorithm SHA256).Hash
+          Write-Host "ISO downloaded: $($iso.FullName)"
+          Write-Host ("ISO size: {0:N2} GB" -f ($iso.Length / 1GB))
+          Write-Host "ISO SHA256: $hash"
+
+      # ------------------------------------------------------------------
+      # 2. Windows ADK Deployment Tools (oscdimg.exe)
+      # ------------------------------------------------------------------
+      - name: Install Windows ADK Deployment Tools
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $adkSetup = 'C:\work\adksetup.exe'
+          Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/?linkid=2289980' -OutFile $adkSetup -UseBasicParsing
+          Write-Host 'Installing ADK Deployment Tools (quiet)...'
+          $p = Start-Process $adkSetup -ArgumentList '/quiet','/norestart','/ceip','off','/features','OptionId.DeploymentTools' -Wait -PassThru
+          Write-Host "adksetup exit code: $($p.ExitCode)"
+          $oscdimg = 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe'
+          if (-not (Test-Path $oscdimg)) { throw "oscdimg.exe not found after ADK install: $oscdimg" }
+          Write-Host "oscdimg ready: $oscdimg"
+
+      # ------------------------------------------------------------------
+      # 3. Extract the ISO media
+      # ------------------------------------------------------------------
+      - name: Extract ISO media
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $img = Mount-DiskImage -ImagePath C:\work\Win11.iso -PassThru
+          try {
+            $drive = ($img | Get-Volume).DriveLetter
+            Write-Host "ISO mounted at ${drive}:"
+            Copy-Item -Path "${drive}:\*" -Destination C:\work\media -Recurse -Force
+          } finally {
+            Dismount-DiskImage -ImagePath C:\work\Win11.iso
+          }
+          Get-ChildItem C:\work\media | Select-Object Name
+
+      # ------------------------------------------------------------------
+      # 4. Prepare install.wim containing ONLY the requested edition
+      # ------------------------------------------------------------------
+      - name: Prepare install.wim (single Pro index)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $srcDir  = 'C:\work\media\sources'
+          $wimPath = Join-Path $srcDir 'install.wim'
+          $esdPath = Join-Path $srcDir 'install.esd'
+          $edition = '${{ inputs.edition_index_name }}'
+          $imgFile = if (Test-Path $esdPath) { $esdPath } else { $wimPath }
+          Write-Host "Source image: $imgFile"
+
+          $images = Get-WindowsImage -ImagePath $imgFile
+          $images | Select-Object ImageIndex, ImageName | Format-Table -Auto
+          $pro = $images | Where-Object { $_.ImageName -eq $edition } | Select-Object -First 1
+          if (-not $pro) { throw "Edition '$edition' not found in the official image" }
+          Write-Host "Exporting index $($pro.ImageIndex) ('$edition') to a clean install.wim..."
+          & dism.exe /Export-Image /SourceImageFile:$imgFile /SourceIndex:$($pro.ImageIndex) /DestinationImageFile:C:\work\install-new.wim /Compress:max /CheckIntegrity
+          if ($LASTEXITCODE -ne 0) { throw "DISM /Export-Image failed ($LASTEXITCODE)" }
+          Remove-Item $imgFile -Force
+          Move-Item C:\work\install-new.wim $wimPath -Force
+          Write-Host ("install.wim ready: {0:N2} GB" -f ((Get-Item $wimPath).Length / 1GB))
+
+      # ------------------------------------------------------------------
+      # 5. Mount the image
+      # ------------------------------------------------------------------
+      - name: Mount install.wim
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & dism.exe /Mount-Image /ImageFile:C:\work\media\sources\install.wim /Index:1 /MountDir:C:\work\mount
+          if ($LASTEXITCODE -ne 0) { throw "DISM /Mount-Image failed ($LASTEXITCODE)" }
+
+      # ------------------------------------------------------------------
+      # 6. Offline servicing: strip apps, apply policies, inject watchdog
+      # ------------------------------------------------------------------
+      - name: Strip provisioned apps (01)
+        shell: powershell
+        run: |
+          & .\build\scripts\01-strip-packages.ps1 -MountDir C:\work\mount
+          if ($LASTEXITCODE -ne 0) { throw "01-strip-packages failed ($LASTEXITCODE)" }
+
+      - name: Apply offline registry hardening (02)
+        shell: powershell
+        run: |
+          & .\build\scripts\02-offline-registry.ps1 -MountDir C:\work\mount
+          if ($LASTEXITCODE -ne 0) { throw "02-offline-registry failed ($LASTEXITCODE)" }
+
+      - name: Inject watchdog and setup files (03)
+        shell: powershell
+        run: |
+          & .\build\scripts\03-inject-files.ps1 -MountDir C:\work\mount -RepoRoot $PWD.Path
+          if ($LASTEXITCODE -ne 0) { throw "03-inject-files failed ($LASTEXITCODE)" }
+
+      # ------------------------------------------------------------------
+      # 7. Unmount/commit, then put autounattend.xml at the MEDIA root
+      #    (that is where Windows Setup looks for it - not inside the WIM)
+      # ------------------------------------------------------------------
+      - name: Unmount image (commit)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & dism.exe /Unmount-Image /MountDir:C:\work\mount /Commit
+          if ($LASTEXITCODE -ne 0) { throw "DISM /Unmount-Image failed ($LASTEXITCODE)" }
+
+      - name: Place autounattend.xml on media root
+        shell: powershell
+        run: |
+          Copy-Item .\build\assets\unattend.xml C:\work\media\autounattend.xml -Force
+          Write-Host 'autounattend.xml placed at media root'
+
+      # ------------------------------------------------------------------
+      # 8. Rebuild bootable ISO with oscdimg (standard dual-boot data:
+      #    BIOS etfsboot.com + UEFI efisys.bin - boot files untouched)
+      # ------------------------------------------------------------------
+      - name: Rebuild bootable ISO (oscdimg)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $oscdimg = 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe'
+          $bootdata = '2#p0,e,b"C:\work\media\boot\etfsboot.com"#pEF,e,b"C:\work\media\efi\microsoft\boot\efisys.bin"'
+          & $oscdimg -m -o -h -u2 -udfver102 "-bootdata:$bootdata" C:\work\media C:\work\ghost-win11.iso
+          if ($LASTEXITCODE -ne 0) { throw "oscdimg failed ($LASTEXITCODE)" }
+          $iso = Get-Item C:\work\ghost-win11.iso
+          Write-Host ("Ghost ISO built: {0:N2} GB" -f ($iso.Length / 1GB))
+          Write-Host "Ghost ISO SHA256: $((Get-FileHash $iso.FullName -Algorithm SHA256).Hash)"
+
+      # ------------------------------------------------------------------
+      # 9. Split into 1900 MB parts + checksums (reliable free-tier route:
+      #    each part stays under GitHub's 2 GB per-file Release limit)
+      # ------------------------------------------------------------------
+      - name: Split ISO into parts + SHA256SUMS
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $isoPath  = 'C:\work\ghost-win11.iso'
+          $outDir   = 'C:\work\out'
+          $partSize = 1900MB
+          $buffer   = New-Object byte[] (10MB)
+          $input    = [System.IO.File]::OpenRead($isoPath)
+          try {
+            $part = 1
+            while ($input.Position -lt $input.Length) {
+              $outPath = Join-Path $outDir ('ghost-win11.iso.part{0:D3}' -f $part)
+              $output = [System.IO.File]::Create($outPath)
+              try {
+                $remaining = $partSize
+                while ($remaining -gt 0 -and $input.Position -lt $input.Length) {
+                  $toRead = [Math]::Min([long]$buffer.Length, [long]$remaining)
+                  $read = $input.Read($buffer, 0, $toRead)
+                  if ($read -le 0) { break }
+                  $output.Write($buffer, 0, $read)
+                  $remaining -= $read
+                }
+              } finally { $output.Dispose() }
+              Write-Host "Part written: $outPath"
+              $part++
+            }
+          } finally { $input.Dispose() }
+
+          $sumLines = @()
+          foreach ($f in @($isoPath) + (Get-ChildItem $outDir -Filter 'ghost-win11.iso.part*' | Sort-Object Name | ForEach-Object FullName)) {
+            $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
+            $sumLines += "$h  $(Split-Path $f -Leaf)"
+          }
+          $sumLines | Set-Content (Join-Path $outDir 'SHA256SUMS.txt') -Encoding ASCII
+          Get-Content (Join-Path $outDir 'SHA256SUMS.txt')
+
+      # ------------------------------------------------------------------
+      # 10. Publish the parts as a GitHub Release (primary delivery route)
+      # ------------------------------------------------------------------
+      - name: Publish Release with ISO parts
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ghost-${{ github.run_number }}
+          name: Ghost Windows 11 ISO (run ${{ github.run_number }})
+          fail_on_unmatched_files: true
+          body: |
+            Hardened Windows 11 Pro x64 ISO, built from the official Microsoft ISO.
+
+            **Rejoin the parts** (Windows): download every `ghost-win11.iso.part*`
+            file into one folder, then run:
+            `copy /b ghost-win11.iso.part* ghost-win11.iso`
+            Verify with `certutil -hashfile ghost-win11.iso SHA256` against SHA256SUMS.txt.
+
+            **Burn with DROFUS on Android:** GPT, FAT32 + split install.wim,
+            high-speed mode ON. (EtchDroid does not reliably boot Windows installers.)
+          files: |
+            C:/work/out/ghost-win11.iso.part*
+            C:/work/out/SHA256SUMS.txt
+
+      # ------------------------------------------------------------------
+      # 11. Whole ISO as a workflow artifact (convenient when storage allows;
+      #     free-tier storage may reject it - the Release above is primary)
+      # ------------------------------------------------------------------
+      - name: Upload full ISO as artifact
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: ghost-win11-iso
+          path: C:\work\ghost-win11.iso
+          retention-days: 7
+
+      # ------------------------------------------------------------------
+      # 12. On failure: keep the DISM log for diagnosis
+      # ------------------------------------------------------------------
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            C:\Windows\Logs\DISM\dism.log
+          if-no-files-found: ignore
+          retention-days: 7

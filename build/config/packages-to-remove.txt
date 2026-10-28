@@ -1,0 +1,34 @@
+# Provisioned Appx packages to strip from the offline image.
+# One display-name pattern per line; matching is a substring wildcard match
+# against both DisplayName and PackageName (see 01-strip-packages.ps1).
+# Provisioned removal = the app is never installed for any user.
+#
+# Conservative list: consumer / telemetry-surface bundleware only.
+# Deliberately NOT listed (kept on purpose):
+#   - Windows Security / Defender components (protection stays)
+#   - Microsoft Store (needed to install apps)
+#   - Windows Terminal (user wants it), Notepad, Paint, Photos
+#   - Microsoft Sticky Notes (harmless)
+#   - OneDrive (its sync client is a Win32 component, not provisioned Appx)
+
+Microsoft.Copilot
+Microsoft.MicrosoftOfficeHub
+Clipchamp.Clipchamp
+Microsoft.Todos
+Microsoft.MicrosoftSolitaireCollection
+MicrosoftTeams
+Microsoft.OutlookForWindows
+Microsoft.GamingApp
+Microsoft.XboxGamingOverlay
+Microsoft.XboxIdentityProvider
+SpotifyAB.SpotifyMusic
+Microsoft.BingNews
+Microsoft.BingWeather
+Microsoft.GetHelp
+Microsoft.Getstarted
+Microsoft.People
+Microsoft.WindowsFeedbackHub
+Microsoft.YourPhone
+Microsoft.ZuneMusic
+Microsoft.ZuneVideo
+MicrosoftWindows.Client.WebExperience
