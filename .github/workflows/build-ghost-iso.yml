@@ -165,20 +165,23 @@ jobs:
       - name: Strip provisioned apps (01)
         shell: powershell
         run: |
+          # A .ps1 invoked with & does not set $LASTEXITCODE - $? is the
+          # success signal for script calls (the strip itself reported
+          # "done" in run 2 and was still flagged as failed by the old check).
           & .\build\scripts\01-strip-packages.ps1 -MountDir C:\work\mount
-          if ($LASTEXITCODE -ne 0) { throw "01-strip-packages failed ($LASTEXITCODE)" }
+          if (-not $?) { throw "01-strip-packages failed" }
 
       - name: Apply offline registry hardening (02)
         shell: powershell
         run: |
           & .\build\scripts\02-offline-registry.ps1 -MountDir C:\work\mount
-          if ($LASTEXITCODE -ne 0) { throw "02-offline-registry failed ($LASTEXITCODE)" }
+          if (-not $?) { throw "02-offline-registry failed" }
 
       - name: Inject watchdog and setup files (03)
         shell: powershell
         run: |
           & .\build\scripts\03-inject-files.ps1 -MountDir C:\work\mount -RepoRoot $PWD.Path
-          if ($LASTEXITCODE -ne 0) { throw "03-inject-files failed ($LASTEXITCODE)" }
+          if (-not $?) { throw "03-inject-files failed" }
 
       # ------------------------------------------------------------------
       # 7. Unmount/commit, then put autounattend.xml at the MEDIA root
