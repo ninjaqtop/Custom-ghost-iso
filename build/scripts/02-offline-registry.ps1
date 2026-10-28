@@ -41,8 +41,10 @@ function Unload-Hive([string]$Name) {
 }
 
 # Best-effort cleanup in case a previous failed run left them loaded.
-& reg.exe unload $SW 2>$null | Out-Null
-& reg.exe unload $SY 2>$null | Out-Null
+try {
+    & reg.exe unload $SW 2>$null | Out-Null
+    & reg.exe unload $SY 2>$null | Out-Null
+} catch { }
 
 try {
     Write-Host "== 02-offline-registry: loading hives"
