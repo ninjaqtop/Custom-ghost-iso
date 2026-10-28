@@ -116,7 +116,15 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $img = Mount-DiskImage -ImagePath C:\work\Win11.iso -PassThru
           try {
-            $drive = ($img | Get-Volume).DriveLetter
+            # Drive-letter assignment can lag the mount on a fresh runner;
+            # poll a fresh Get-DiskImage query until the letter appears.
+            $drive = $null
+            for ($i = 0; $i -lt 15 -and -not $drive; $i++) {
+              $vol = Get-DiskImage -ImagePath C:\work\Win11.iso | Get-Volume | Where-Object { $_.DriveLetter }
+              if ($vol) { $drive = ($vol | Select-Object -First 1).DriveLetter }
+              if (-not $drive) { Start-Sleep -Seconds 2 }
+            }
+            if (-not $drive) { throw "Mounted ISO volume has no drive letter after 30s" }
             Write-Host "ISO mounted at ${drive}:"
             Copy-Item -Path "${drive}:\*" -Destination C:\work\media -Recurse -Force
           } finally {
